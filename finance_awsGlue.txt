@@ -1,0 +1,82 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql.functions import col
+## @params: [JOB_NAME]
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+path = "s3://frs-homeloan/input/model_auth_Rep/"
+df = spark.read.option("header", "true").csv(path)
+
+print("Row count", df.count()) # check row count
+print("Col count", len(df.columns)) # checking column count
+
+def validate_dataframe(df,n_cols=None,check_duplicates=False,check_nulls=False):
+    if n_cols and len(df.columns) != n_cols:
+        return False, f"Expected {n_cols} columns but got {len(df.columns)}"
+        
+    if check_duplicates and df.count() != df.dropDuplicates().count():
+        return False, "Duplicates found"
+    
+    if check_nulls and df.filter(df.isNull()).count() > 0:
+        return False, "Null values found"
+        
+    return True, "DataFrame passed validation"
+
+is_valid, message = validate_dataframe(df, n_cols=14, check_duplicates=True)
+print(is_valid, message)
+
+# ECL report
+
+# Stage 1 ECL
+df = df.withColumn("stage1ecl", col("EAD") * col("PD12") * col("LGD"))
+
+# Stage 2 ECL
+df = df.withColumn("stage2ecl", col("EAD") * col("PDLT") * col("LGD"))
+
+# Stage 3 ECL
+df = df.withColumn("stage3ecl", col("EAD") * col("LGD"))
+
+ecl_dataframe = df.select("EAD", "PD12", "LGD", "PDLT", "stage1ecl", "stage2ecl", "stage3ecl")
+
+ecl_dataframe.show(5)
+ecl_dataframe.coalesce(1).write.option("header", "true").mode("overwrite").parquet("s3://frs-homeloan/output/ecl_dataframe_csv")
+ecl_dataframe.write.mode("overwrite").option("header", True).csv("s3://frs-homeloan/output/ecl_dataframe1_csv")
+
+# EAD Variation reports
+# change_EAD = EAD - Previous EAD
+df = df.withColumn("change_EAD", col("EAD") - col("Previous EAD"))
+
+# percentage_change_EAD = ((EAD - Previous EAD) / Previous EAD) * 100
+df = df.withColumn("percentage_change_EAD", ((col("EAD") - col("Previous EAD")) / col("Previous EAD")) * 100)
+
+EAD_DF = df.select("EAD", "Previous EAD", "change_EAD", "percentage_change_EAD")
+EAD_DF.show(5)
+
+EAD_DF.coalesce(1).write.option("header", "true").mode("overwrite").csv("s3://frs-homeloan/output/EAD_DF_csv")
+EAD_DF.write.mode("overwrite").option("header", True).csv("s3://frs-homeloan/output/EAD_DF1_csv")
+
+# LGD Variation reports
+# change_LGD = LGD - Previous LGD
+df = df.withColumn("change_LGD", col("LGD") - col("Previous LGD"))
+
+# percentage_change_LGD = ((LGD - Previous LGD) / Previous LGD) * 100
+df = df.withColumn("percentage_change_LGD", ((col("LGD") - col("Previous LGD")) / col("Previous LGD")) * 100)
+
+LGD_DF = df.select("LGD", "Previous LGD", "change_LGD", "percentage_change_LGD")
+LGD_DF.show(5)
+
+LGD_DF.coalesce(1).write.option("header", "true").mode("overwrite").csv("s3://frs-homeloan/output/LGD_DF_csv")
+LGD_DF.write.mode("overwrite").option("header", True).csv("s3://frs-homeloan/output/LGD_DF1_csv")
+
+print("All project run successfully")
+job.commit()
